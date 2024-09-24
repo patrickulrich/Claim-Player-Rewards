@@ -5,10 +5,11 @@ using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
 using System;
+using System.Globalization;
 
 namespace Oxide.Plugins
 {
-    [Info("Claim Player Rewards", "saulteafarmer", "0.1.0")]
+    [Info("Claim Player Rewards", "saulteafarmer", "0.1.1")]
     [Description("Allows players to claim rewards based on a JSON configuration file and logs claims.")]
 
     public class ClaimPlayerRewards : RustPlugin
@@ -21,14 +22,12 @@ namespace Oxide.Plugins
         private const string ConfigFilePath = DataFolderPath + "ClaimPlayerRewards.json";
         private const string ClaimedRewardsFilePath = DataFolderPath + "ClaimedRewards.json";
 
-        // Dictionary to hold SteamIDs and corresponding item amounts
-        private Dictionary<string, int> rewardData;
-
-        // List to hold claims history
-        private List<ClaimRecord> claims;
-
         // Permission name for using the claim command
         private const string PermissionClaim = "claimplayerrewards.use";
+
+        // Data managers
+        private RewardDataManager rewardDataManager;
+        private ClaimDataManager claimDataManager;
 
         // Configurable data structure
         private class ConfigData
@@ -51,11 +50,15 @@ namespace Oxide.Plugins
             // Load the configuration
             LoadConfig();
 
+            // Initialize data managers
+            rewardDataManager = new RewardDataManager(ConfigFilePath, this);
+            claimDataManager = new ClaimDataManager(ClaimedRewardsFilePath, this);
+
             // Load reward data from JSON file when the plugin initializes
-            LoadRewardData();
+            rewardDataManager.LoadRewardData();
 
             // Load claims data from JSON file when the plugin initializes
-            LoadClaimedRewards();
+            claimDataManager.LoadClaimedRewards();
         }
 
         // Load plugin configuration and ensure defaults are saved if config is empty or missing
@@ -77,10 +80,20 @@ namespace Oxide.Plugins
                     LoadDefaultConfig();
                 }
             }
+            catch (IOException e)
+            {
+                PrintWarning($"IO error loading config: {e.Message}, generating default config...");
+                LoadDefaultConfig();
+            }
+            catch (JsonException e)
+            {
+                PrintWarning($"JSON error loading config: {e.Message}, generating default config...");
+                LoadDefaultConfig();
+            }
             catch (Exception e)
             {
-                PrintWarning($"Error loading config: {e.Message}, generating default config...");
-                LoadDefaultConfig();
+                PrintWarning($"Unexpected error loading config: {e.Message}, generating default config...");
+                throw; // Rethrow the exception
             }
         }
 
@@ -102,20 +115,17 @@ namespace Oxide.Plugins
 
             string playerSteamId = player.UserIDString;
 
-            if (rewardData.ContainsKey(playerSteamId))
+            if (rewardDataManager.HasReward(playerSteamId))
             {
-                int amountToGive = rewardData[playerSteamId];
+                int amountToGive = rewardDataManager.GetRewardAmount(playerSteamId);
                 // Use the configured reward item and skin ID
                 GiveItem(player, config.RewardItem, amountToGive, config.RewardSkinID);
 
                 // Log the claim
-                LogClaim(playerSteamId, amountToGive);
+                claimDataManager.LogClaim(playerSteamId, amountToGive);
 
                 // Remove the player's entry from the rewardData after claiming
-                rewardData.Remove(playerSteamId);
-
-                // Save updated reward data to JSON file
-                SaveRewardData();
+                rewardDataManager.RemoveReward(playerSteamId);
 
                 SendReply(player, Lang("ClaimSuccess", player.UserIDString, amountToGive, config.RewardItem));
             }
@@ -135,105 +145,6 @@ namespace Oxide.Plugins
             }
         }
 
-        private void LogClaim(string steamId, int amountClaimed)
-        {
-            // Create a new claim record
-            ClaimRecord newClaim = new ClaimRecord
-            {
-                steamid = steamId,
-                timestamp = DateTime.UtcNow.ToString("o"), // ISO 8601 format
-                amount_claimed = amountClaimed
-            };
-
-            // Add the new claim to the list
-            claims.Add(newClaim);
-
-            // Save the updated claims list to the JSON file
-            SaveClaimedRewards();
-        }
-
-        private void LoadRewardData()
-        {
-            // Check if the file exists before loading
-            if (File.Exists(ConfigFilePath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(ConfigFilePath);
-                    rewardData = JsonConvert.DeserializeObject<Dictionary<string, int>>(json) ?? new Dictionary<string, int>();
-                    Puts("Reward data loaded successfully.");
-                }
-                catch (System.Exception ex)
-                {
-                    Puts($"Failed to load reward data: {ex.Message}");
-                    rewardData = new Dictionary<string, int>();
-                }
-            }
-            else
-            {
-                Puts("No reward data found, creating a new file.");
-                rewardData = new Dictionary<string, int>();
-                SaveRewardData();
-            }
-        }
-
-        private void SaveRewardData()
-        {
-            try
-            {
-                // Save the reward data back to the JSON file
-                string json = JsonConvert.SerializeObject(rewardData, Formatting.Indented);
-                File.WriteAllText(ConfigFilePath, json);
-                Puts("Reward data saved successfully.");
-            }
-            catch (System.Exception ex)
-            {
-                Puts($"Failed to save reward data: {ex.Message}");
-            }
-        }
-
-        private void LoadClaimedRewards()
-        {
-            // Check if the claimed rewards file exists before loading
-            if (File.Exists(ClaimedRewardsFilePath))
-            {
-                try
-                {
-                    string json = File.ReadAllText(ClaimedRewardsFilePath);
-                    var claimContainer = JsonConvert.DeserializeObject<ClaimContainer>(json);
-                    claims = claimContainer.claims ?? new List<ClaimRecord>();
-                    Puts("Claimed rewards data loaded successfully.");
-                }
-                catch (System.Exception ex)
-                {
-                    Puts($"Failed to load claimed rewards data: {ex.Message}");
-                    claims = new List<ClaimRecord>();
-                }
-            }
-            else
-            {
-                Puts("No claimed rewards data found, creating a new file.");
-                claims = new List<ClaimRecord>();
-                SaveClaimedRewards();
-            }
-        }
-
-        private void SaveClaimedRewards()
-        {
-            try
-            {
-                // Save the claims data back to the JSON file
-                var claimContainer = new ClaimContainer { claims = claims };
-                string json = JsonConvert.SerializeObject(claimContainer, Formatting.Indented);
-                File.WriteAllText(ClaimedRewardsFilePath, json);
-                Puts("Claimed rewards data saved successfully.");
-            }
-            catch (System.Exception ex)
-            {
-                Puts($"Failed to save claimed rewards data: {ex.Message}");
-            }
-        }
-
         // Localization with Lang API
         protected override void LoadDefaultMessages()
         {
@@ -247,7 +158,194 @@ namespace Oxide.Plugins
 
         private string Lang(string key, string userId = null, params object[] args)
         {
-            return string.Format(lang.GetMessage(key, this, userId), args);
+            return string.Format(CultureInfo.InvariantCulture, lang.GetMessage(key, this, userId), args);
+        }
+
+        // Nested class to handle reward data
+        private class RewardDataManager
+        {
+            private string filePath;
+            private Dictionary<string, int> rewardData;
+            private ClaimPlayerRewards plugin;
+
+            public RewardDataManager(string filePath, ClaimPlayerRewards plugin)
+            {
+                this.filePath = filePath;
+                this.plugin = plugin;
+                rewardData = new Dictionary<string, int>();
+            }
+
+            public void LoadRewardData()
+            {
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        string json = File.ReadAllText(filePath);
+                        rewardData = JsonConvert.DeserializeObject<Dictionary<string, int>>(json) ?? new Dictionary<string, int>();
+                        plugin.Puts("Reward data loaded successfully.");
+                    }
+                    catch (IOException ex)
+                    {
+                        plugin.Puts($"IO error loading reward data: {ex.Message}");
+                        rewardData = new Dictionary<string, int>();
+                    }
+                    catch (JsonException ex)
+                    {
+                        plugin.Puts($"JSON error loading reward data: {ex.Message}");
+                        rewardData = new Dictionary<string, int>();
+                    }
+                    catch (Exception ex)
+                    {
+                        plugin.Puts($"Unexpected error loading reward data: {ex.Message}");
+                        throw;
+                    }
+                }
+                else
+                {
+                    plugin.Puts("No reward data found, creating a new file.");
+                    rewardData = new Dictionary<string, int>();
+                    SaveRewardData();
+                }
+            }
+
+            public void SaveRewardData()
+            {
+                try
+                {
+                    // Save the reward data back to the JSON file
+                    string json = JsonConvert.SerializeObject(rewardData, Formatting.Indented);
+                    File.WriteAllText(filePath, json);
+                    plugin.Puts("Reward data saved successfully.");
+                }
+                catch (IOException ex)
+                {
+                    plugin.Puts($"IO error saving reward data: {ex.Message}");
+                    throw;
+                }
+                catch (JsonException ex)
+                {
+                    plugin.Puts($"JSON error saving reward data: {ex.Message}");
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    plugin.Puts($"Unexpected error saving reward data: {ex.Message}");
+                    throw;
+                }
+            }
+
+            public bool HasReward(string steamId)
+            {
+                return rewardData.ContainsKey(steamId);
+            }
+
+            public int GetRewardAmount(string steamId)
+            {
+                return rewardData.ContainsKey(steamId) ? rewardData[steamId] : 0;
+            }
+
+            public void RemoveReward(string steamId)
+            {
+                if (rewardData.Remove(steamId))
+                {
+                    SaveRewardData();
+                }
+            }
+        }
+
+        // Nested class to handle claimed rewards data
+        private class ClaimDataManager
+        {
+            private string filePath;
+            private List<ClaimRecord> claims;
+            private ClaimPlayerRewards plugin;
+
+            public ClaimDataManager(string filePath, ClaimPlayerRewards plugin)
+            {
+                this.filePath = filePath;
+                this.plugin = plugin;
+                claims = new List<ClaimRecord>();
+            }
+
+            public void LoadClaimedRewards()
+            {
+                if (File.Exists(filePath))
+                {
+                    try
+                    {
+                        string json = File.ReadAllText(filePath);
+                        var claimContainer = JsonConvert.DeserializeObject<ClaimContainer>(json);
+                        claims = claimContainer.claims ?? new List<ClaimRecord>();
+                        plugin.Puts("Claimed rewards data loaded successfully.");
+                    }
+                    catch (IOException ex)
+                    {
+                        plugin.Puts($"IO error loading claimed rewards data: {ex.Message}");
+                        claims = new List<ClaimRecord>();
+                    }
+                    catch (JsonException ex)
+                    {
+                        plugin.Puts($"JSON error loading claimed rewards data: {ex.Message}");
+                        claims = new List<ClaimRecord>();
+                    }
+                    catch (Exception ex)
+                    {
+                        plugin.Puts($"Unexpected error loading claimed rewards data: {ex.Message}");
+                        throw;
+                    }
+                }
+                else
+                {
+                    plugin.Puts("No claimed rewards data found, creating a new file.");
+                    claims = new List<ClaimRecord>();
+                    SaveClaimedRewards();
+                }
+            }
+
+            public void SaveClaimedRewards()
+            {
+                try
+                {
+                    // Save the claims data back to the JSON file
+                    var claimContainer = new ClaimContainer { claims = claims };
+                    string json = JsonConvert.SerializeObject(claimContainer, Formatting.Indented);
+                    File.WriteAllText(filePath, json);
+                    plugin.Puts("Claimed rewards data saved successfully.");
+                }
+                catch (IOException ex)
+                {
+                    plugin.Puts($"IO error saving claimed rewards data: {ex.Message}");
+                    throw;
+                }
+                catch (JsonException ex)
+                {
+                    plugin.Puts($"JSON error saving claimed rewards data: {ex.Message}");
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    plugin.Puts($"Unexpected error saving claimed rewards data: {ex.Message}");
+                    throw;
+                }
+            }
+
+            public void LogClaim(string steamId, int amountClaimed)
+            {
+                // Create a new claim record
+                ClaimRecord newClaim = new ClaimRecord
+                {
+                    steamid = steamId,
+                    timestamp = DateTime.UtcNow.ToString("o", CultureInfo.InvariantCulture), // ISO 8601 format
+                    amount_claimed = amountClaimed
+                };
+
+                // Add the new claim to the list
+                claims.Add(newClaim);
+
+                // Save the updated claims list to the JSON file
+                SaveClaimedRewards();
+            }
         }
 
         private class ClaimRecord
